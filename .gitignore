@@ -1,2 +1,4 @@
 ﻿# Ignoriere virtuelle Umgebung
 .venv/
+
+.venv/
