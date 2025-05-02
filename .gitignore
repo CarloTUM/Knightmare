@@ -1,4 +1,59 @@
-﻿# Ignoriere virtuelle Umgebung
-.venv/
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
+# Virtual environments
 .venv/
+venv/
+env/
+ENV/
+
+# Tooling caches
+.cache/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+nosetests.xml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Project artefacts
+data/
+models/
+runs/
+*.h5
+*.pth
+*.ckpt
+
+# Docs build
+site/
