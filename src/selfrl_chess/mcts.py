@@ -1,153 +1,278 @@
+"""Monte-Carlo Tree Search with PUCT, Dirichlet noise and virtual loss.
+
+The search follows the AlphaZero formulation. Highlights compared to a naive
+implementation:
+
+* Root nodes get Dirichlet noise mixed into their priors so self-play
+  generates exploratory games.
+* Virtual loss lets multiple simulations descend in flight without re-visiting
+  the same path; useful even in the single-process case for batched leaf
+  evaluation.
+* Leaf evaluation is batched: the search collects up to ``EVAL_BATCH`` leaves
+  before invoking the network, amortising GPU launch overhead.
+* Terminal positions are scored exactly (+/- 1 / 0) instead of being passed
+  through the network.
+"""
+
+from __future__ import annotations
+
 import math
-import numpy as np
+from dataclasses import dataclass, field
+from typing import Iterable
+
 import chess
+import numpy as np
 import torch
-from collections import defaultdict
 
-# Absolute imports – greifen auf Module im selben Ordner zu
-from network import PolicyValueNet
-from config import CPUCT, NUM_SIMULATIONS, DEVICE
-from board import board_to_tensor
-from utils import move_to_index
+from .board import board_to_tensor
+from .config import (
+    CPUCT,
+    DIRICHLET_ALPHA,
+    DIRICHLET_EPS,
+    EVAL_BATCH,
+    NUM_SIMULATIONS,
+    VIRTUAL_LOSS,
+)
+from .encoding import move_to_index
+from .network import PolicyValueNet
 
 
+@dataclass
 class TreeNode:
-    """
-    Single node in the MCTS tree.
-    """
-    def __init__(self, parent, prior_p):
-        self.parent = parent
-        self.P = prior_p    # prior probability
-        self.N = 0          # visit count
-        self.W = 0.0        # total value
-        self.Q = 0.0        # mean value
-        self.children = {}  # map action -> TreeNode
+    """One node of the search tree."""
 
-    def expand(self, action_priors):
-        """
-        Add new children for each legal move with given prior probability.
-        action_priors: list of (move, prob)
-        """
-        for action, prob in action_priors:
-            if action not in self.children:
-                self.children[action] = TreeNode(self, prob)
+    parent: "TreeNode | None"
+    prior: float
+    move: chess.Move | None = None
+    visits: int = 0
+    total_value: float = 0.0
+    virtual_loss: float = 0.0
+    children: dict[chess.Move, "TreeNode"] = field(default_factory=dict)
+    is_terminal: bool = False
+    terminal_value: float = 0.0
 
-    def select(self, c_puct):
-        """
-        Select action among children that maximizes PUCT score.
-        Returns: (action, next_node)
-        """
-        return max(
-            self.children.items(),
-            key=lambda act_node: act_node[1]._ucb_score(c_puct)
-        )
+    @property
+    def q(self) -> float:
+        if self.visits == 0:
+            return 0.0
+        return (self.total_value - self.virtual_loss) / max(self.visits, 1)
 
-    def _ucb_score(self, c_puct):
-        """
-        Calculate and return the UCB score for this node.
-        """
-        u = c_puct * self.P * math.sqrt(self.parent.N) / (1 + self.N)
-        return self.Q + u
+    def is_expanded(self) -> bool:
+        return bool(self.children) or self.is_terminal
 
-    def update(self, leaf_value):
-        """
-        Update visit count, total and mean value.
-        """
-        self.N += 1
-        self.W += leaf_value
-        self.Q = self.W / self.N
+    def select(self, c_puct: float) -> tuple[chess.Move, "TreeNode"]:
+        sqrt_n = math.sqrt(max(self.visits, 1))
+        best_score = -float("inf")
+        best_move: chess.Move | None = None
+        best_child: TreeNode | None = None
+        for move, child in self.children.items():
+            u = c_puct * child.prior * sqrt_n / (1 + child.visits)
+            score = child.q + u
+            if score > best_score:
+                best_score = score
+                best_move = move
+                best_child = child
+        assert best_move is not None and best_child is not None
+        return best_move, best_child
 
-    def update_recursive(self, leaf_value):
-        """
-        Update this node and all ancestors.
-        leaf_value: evaluation from the viewpoint of the player who just moved.
-        """
-        if self.parent:
-            self.parent.update_recursive(-leaf_value)
-        self.update(leaf_value)
+    def expand(self, priors: Iterable[tuple[chess.Move, float]]) -> None:
+        for move, p in priors:
+            if move not in self.children:
+                self.children[move] = TreeNode(parent=self, prior=p, move=move)
+
+    def backup(self, value: float) -> None:
+        node: TreeNode | None = self
+        sign = 1.0
+        while node is not None:
+            node.visits += 1
+            node.total_value += value * sign
+            sign = -sign
+            node = node.parent
+
+
+def _terminal_value(board: chess.Board) -> float | None:
+    """Return the value (from the side-to-move perspective) for a terminal node."""
+    outcome = board.outcome(claim_draw=True)
+    if outcome is None:
+        return None
+    if outcome.winner is None:
+        return 0.0
+    return 1.0 if outcome.winner == board.turn else -1.0
 
 
 class MCTS:
-    """
-    Monte Carlo Tree Search with PUCT and neural network evaluation.
-    """
-    def __init__(self, policy_value_net: PolicyValueNet):
-        self.root = TreeNode(None, 1.0)
-        self.policy_value_net = policy_value_net.to(DEVICE)
-        self.policy_value_net.eval()
+    """Batched PUCT search."""
 
-    def _evaluate_leaf(self, board: chess.Board):
-        """
-        Run the neural network to obtain move priors and leaf value.
-        Returns:
-            action_priors: list of (move, prob) for legal moves
-            leaf_value: float
-        """
-        state = board_to_tensor(board)
-        state = torch.from_numpy(state).unsqueeze(0).to(DEVICE)
-        with torch.no_grad():
-            log_probs, value = self.policy_value_net(state)
-        probs = torch.exp(log_probs).squeeze(0).cpu().numpy()
-        leaf_value = value.item()
+    def __init__(
+        self,
+        net: PolicyValueNet,
+        *,
+        num_simulations: int = NUM_SIMULATIONS,
+        c_puct: float = CPUCT,
+        dirichlet_alpha: float = DIRICHLET_ALPHA,
+        dirichlet_eps: float = DIRICHLET_EPS,
+        eval_batch: int = EVAL_BATCH,
+        virtual_loss: float = VIRTUAL_LOSS,
+        device: torch.device | str = "cpu",
+    ) -> None:
+        self.net = net
+        self.device = torch.device(device)
+        self.num_simulations = num_simulations
+        self.c_puct = c_puct
+        self.dirichlet_alpha = dirichlet_alpha
+        self.dirichlet_eps = dirichlet_eps
+        self.eval_batch = max(1, eval_batch)
+        self.virtual_loss = virtual_loss
+        self.root: TreeNode | None = None
 
-        legal_moves = list(board.legal_moves)
-        action_priors = []
-        prob_sum = 0.0
-        for move in legal_moves:
-            idx = move_to_index(move)
-            p = probs[idx]
-            action_priors.append((move, p))
-            prob_sum += p
+    # ------------------------------------------------------------------ public
 
-        action_priors = [(m, p / prob_sum) for m, p in action_priors]
-        return action_priors, leaf_value
+    def reset(self) -> None:
+        self.root = None
 
-    def _simulate(self, board: chess.Board):
-        """
-        Perform one simulation from the root.
-        """
-        node = self.root
-        moves_played = []
+    def run(
+        self,
+        board: chess.Board,
+        *,
+        add_noise: bool = True,
+    ) -> TreeNode:
+        """Run ``num_simulations`` simulations rooted at ``board`` and return the root."""
+        fresh_root = self.root is None
+        if fresh_root:
+            self.root = TreeNode(parent=None, prior=1.0)
+            self._expand_root(board.copy(stack=False), self.root)
 
-        # Selection
-        while node.children:
-            action, node = node.select(CPUCT)
-            board.push(action)
-            moves_played.append(action)
+        if add_noise and fresh_root and self.root is not None and self.root.children:
+            self._inject_dirichlet(self.root)
 
-        # Expansion & Evaluation
-        action_priors, leaf_value = self._evaluate_leaf(board)
-        node.expand(action_priors)
+        sims_done = 0
+        while sims_done < self.num_simulations:
+            batch: list[tuple[TreeNode, chess.Board]] = []
+            seen: set[int] = set()
+            attempts = 0
+            max_attempts = self.eval_batch * 4
+            while (
+                len(batch) < self.eval_batch
+                and sims_done + len(batch) < self.num_simulations
+                and attempts < max_attempts
+            ):
+                attempts += 1
+                leaf, leaf_board = self._descend(board.copy(stack=False))
+                term = _terminal_value(leaf_board)
+                if term is not None:
+                    leaf.is_terminal = True
+                    leaf.terminal_value = term
+                    self._undo_virtual_loss(leaf)
+                    leaf.backup(term)
+                    sims_done += 1
+                    continue
+                if id(leaf) in seen:
+                    # Same leaf re-selected within this batch -- undo virtual
+                    # loss on the path and try again so we do not double-count.
+                    self._undo_virtual_loss(leaf)
+                    continue
+                seen.add(id(leaf))
+                batch.append((leaf, leaf_board))
+            if not batch:
+                continue
+            self._expand_and_backup(batch)
+            sims_done += len(batch)
 
-        # Backpropagation
-        node.update_recursive(-leaf_value)
+        return self.root
 
-        # Undo selected moves
-        for _ in moves_played:
-            board.pop()
+    def policy(
+        self,
+        board: chess.Board,
+        *,
+        temperature: float,
+        add_noise: bool = True,
+    ) -> np.ndarray:
+        """Return a length-4672 probability vector over actions."""
+        from .encoding import ACTION_SIZE
 
-    def get_move_probs(self, board: chess.Board, temp: float = 1e-3):
-        """
-        Run MCTS simulations and compute move probabilities.
-        Returns:
-            moves: list of chess.Move
-            probs: numpy array of probabilities
-        """
-        self.root = TreeNode(None, 1.0)
-        for _ in range(NUM_SIMULATIONS):
-            board_copy = board.copy()
-            self._simulate(board_copy)
-
-        counts = [(child.N, action) for action, child in self.root.children.items()]
-        visits = np.array([cnt for cnt, _ in counts], dtype=np.float32)
-
-        if temp == 0:
-            best = np.argmax(visits)
+        root = self.run(board, add_noise=add_noise)
+        visits = np.zeros(ACTION_SIZE, dtype=np.float32)
+        for move, child in root.children.items():
+            visits[move_to_index(move)] = child.visits
+        if visits.sum() == 0:
+            visits[:] = 1.0 / ACTION_SIZE
+            return visits
+        if temperature <= 1e-3:
+            best = int(np.argmax(visits))
             probs = np.zeros_like(visits)
             probs[best] = 1.0
-        else:
-            visits = visits ** (1 / temp)
-            probs = visits / np.sum(visits)
+            return probs
+        scaled = visits ** (1.0 / temperature)
+        return scaled / scaled.sum()
 
-        moves = [action for _, action in counts]
-        return moves, probs
+    def advance(self, move: chess.Move) -> None:
+        """Move the root down to ``move`` so search trees can be reused across plies."""
+        if self.root is None or move not in self.root.children:
+            self.root = None
+            return
+        self.root = self.root.children[move]
+        self.root.parent = None
+
+    # ----------------------------------------------------------------- helpers
+
+    def _descend(self, board: chess.Board) -> tuple[TreeNode, chess.Board]:
+        assert self.root is not None
+        node = self.root
+        while node.is_expanded() and not node.is_terminal:
+            move, node = node.select(self.c_puct)
+            board.push(move)
+            node.virtual_loss += self.virtual_loss
+        return node, board
+
+    def _undo_virtual_loss(self, node: TreeNode) -> None:
+        cur: TreeNode | None = node
+        while cur is not None and cur.parent is not None:
+            cur.virtual_loss = max(0.0, cur.virtual_loss - self.virtual_loss)
+            cur = cur.parent
+
+    def _expand_root(self, board: chess.Board, node: TreeNode) -> None:
+        priors, _ = self._evaluate([board])
+        node.expand(priors[0])
+
+    def _inject_dirichlet(self, node: TreeNode) -> None:
+        if not node.children:
+            return
+        rng = np.random.default_rng()
+        noise = rng.dirichlet([self.dirichlet_alpha] * len(node.children))
+        eps = self.dirichlet_eps
+        for (_, child), n in zip(node.children.items(), noise):
+            child.prior = (1 - eps) * child.prior + eps * float(n)
+
+    def _expand_and_backup(self, batch: list[tuple[TreeNode, chess.Board]]) -> None:
+        boards = [b for _, b in batch]
+        priors_per_leaf, values = self._evaluate(boards)
+        for (leaf, board), priors, value in zip(batch, priors_per_leaf, values):
+            leaf.expand(priors)
+            self._undo_virtual_loss(leaf)
+            leaf.backup(value)
+
+    @torch.inference_mode()
+    def _evaluate(
+        self, boards: list[chess.Board]
+    ) -> tuple[list[list[tuple[chess.Move, float]]], list[float]]:
+        tensors = np.stack([board_to_tensor(b) for b in boards])
+        x = torch.from_numpy(tensors).to(self.device, non_blocking=True)
+        log_probs, values = self.net(x)
+        probs = log_probs.exp().cpu().numpy()
+        values_list = values.view(-1).cpu().numpy().tolist()
+
+        priors_per_leaf: list[list[tuple[chess.Move, float]]] = []
+        for board, probs_row in zip(boards, probs):
+            legal = list(board.legal_moves)
+            if not legal:
+                priors_per_leaf.append([])
+                continue
+            indices = np.fromiter((move_to_index(m) for m in legal), dtype=np.int64, count=len(legal))
+            masked = probs_row[indices]
+            total = float(masked.sum())
+            if total <= 1e-8:
+                masked = np.full_like(masked, 1.0 / len(legal))
+            else:
+                masked = masked / total
+            priors_per_leaf.append(list(zip(legal, masked.astype(float).tolist())))
+        return priors_per_leaf, values_list
