@@ -1,5 +1,8 @@
-﻿python-chess>=1.999
-torch>=2.0
-numpy
-tqdm
-h5py
+# Runtime dependencies. Canonical source of truth is pyproject.toml; this
+# file exists for convenience (e.g. plain `pip install -r requirements.txt`).
+chess>=1.999
+h5py>=3.10
+numpy>=1.26
+torch>=2.1
+tqdm>=4.66
+typer>=0.12
