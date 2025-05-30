@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+title: "Knightmare: an AlphaZero-style self-play chess engine"
+message: "If you use this software, please cite it as below."
+type: software
+authors:
+  - family-names: "Deutschmann"
+    given-names: "Carlo"
+    email: "deutschmanncarlo@gmail.com"
+    affiliation: "Technical University of Munich"
+repository-code: "https://github.com/CarloTUM/Knightmare"
+license: MIT
+version: "0.1.0"
+date-released: "2025-05-30"
+keywords:
+  - chess
+  - alphazero
+  - reinforcement-learning
+  - mcts
+  - pytorch
