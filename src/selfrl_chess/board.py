@@ -6,7 +6,6 @@ The encoder produces a tensor of shape ``(NUM_PLANES, 8, 8)`` (default 17):
     * 6..11    Black pieces.
     * 12       Side-to-move plane (1.0 if white to move, else 0.0).
     * 13..16   Castling rights (W kingside, W queenside, B kingside, B queenside).
-    * 17       Halfmove clock / 100 (only present if ``include_halfmove`` is True).
 
 Setting ``flip_for_black`` mirrors the board so the side to move is always
 "at the bottom" -- a trick borrowed from AlphaZero that lets the network share
@@ -53,8 +52,6 @@ def board_to_tensor(
     for i, flag in enumerate(rights, start=13):
         tensor[i, :, :] = 1.0 if flag else 0.0
 
-    # Halfmove clock; clipped to [0, 100] so the channel stays bounded.
-    tensor[16, :, :] = min(board.halfmove_clock, 100) / 100.0
     return tensor
 
 
