@@ -17,13 +17,13 @@ import logging
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Callable
+from typing import IO
 
 import chess
 import numpy as np
-import torch
 
 from . import __version__
 from .config import NUM_SIMULATIONS

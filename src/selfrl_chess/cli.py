@@ -7,7 +7,6 @@ UCI engine; the underlying functions are exposed for programmatic use.
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 import typer
@@ -39,7 +38,7 @@ def _version_callback(value: bool) -> None:
 @app.callback()
 def _root(
     verbose: bool = typer.Option(False, "--verbose", "-v"),
-    version: bool = typer.Option(  # noqa: ARG001 -- consumed by callback
+    version: bool = typer.Option(
         False,
         "--version",
         callback=_version_callback,

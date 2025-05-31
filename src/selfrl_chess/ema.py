@@ -6,8 +6,8 @@ network usually outperforms the raw network by ~50 Elo.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from copy import deepcopy
-from typing import Iterable
 
 import torch
 import torch.nn as nn
@@ -26,10 +26,10 @@ class ModelEMA:
 
     @torch.no_grad()
     def update(self, model: nn.Module) -> None:
-        for ema_p, p in zip(self._params(self.module), self._params(model)):
+        for ema_p, p in zip(self._params(self.module), self._params(model), strict=True):
             ema_p.mul_(self.decay).add_(p.detach(), alpha=1.0 - self.decay)
         # Also copy buffers (BN running stats) verbatim -- they are not learnable.
-        for ema_b, b in zip(self.module.buffers(), model.buffers()):
+        for ema_b, b in zip(self.module.buffers(), model.buffers(), strict=True):
             ema_b.copy_(b)
 
     @staticmethod

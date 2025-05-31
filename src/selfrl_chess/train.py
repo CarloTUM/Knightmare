@@ -15,13 +15,12 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Iterable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 import h5py
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -166,9 +165,7 @@ def train(
             for g in optimizer.param_groups:
                 g["lr"] = lr
 
-            ctx = (
-                torch.amp.autocast("cuda", dtype=torch.float16) if use_amp else nullcontext()
-            )
+            ctx = torch.amp.autocast("cuda", dtype=torch.float16) if use_amp else nullcontext()
             with ctx:
                 log_p, pred_v = model(states)
                 pred_v = pred_v.view(-1)
@@ -229,9 +226,9 @@ def train(
     return best_path
 
 
-def _maybe_tensorboard():  # noqa: ANN202 -- optional dep, type fluctuates
+def _maybe_tensorboard():
     try:
-        from torch.utils.tensorboard import SummaryWriter  # type: ignore[import-not-found]
+        from torch.utils.tensorboard import SummaryWriter
     except Exception:  # pragma: no cover - optional dependency
         return None
     LOG_DIR.mkdir(parents=True, exist_ok=True)

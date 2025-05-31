@@ -35,9 +35,7 @@ def test_uci_handshake_emits_uciok_and_readyok() -> None:
 
 
 def test_uci_position_and_go_emit_legal_bestmove() -> None:
-    engine, out = _engine(
-        "uci\nisready\nucinewgame\nposition startpos\ngo nodes 2\nquit\n"
-    )
+    engine, out = _engine("uci\nisready\nucinewgame\nposition startpos\ngo nodes 2\nquit\n")
     engine.run()
     lines = out.getvalue().splitlines()
     bestmove = next(line for line in lines if line.startswith("bestmove "))

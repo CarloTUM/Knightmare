@@ -6,8 +6,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from selfrl_chess.mcts import MCTS, _terminal_value
-from selfrl_chess.network import PolicyValueNet
+from selfrl_chess.mcts import MCTS, _terminal_value  # noqa: E402
+from selfrl_chess.network import PolicyValueNet  # noqa: E402
 
 
 def _tiny_net() -> PolicyValueNet:

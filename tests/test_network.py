@@ -4,7 +4,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from selfrl_chess.network import PolicyValueNet
+from selfrl_chess.network import PolicyValueNet  # noqa: E402
 
 
 def test_forward_shapes() -> None:

@@ -17,8 +17,8 @@ implementation:
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable
 
 import chess
 import numpy as np
@@ -41,13 +41,13 @@ from .network import PolicyValueNet
 class TreeNode:
     """One node of the search tree."""
 
-    parent: "TreeNode | None"
+    parent: TreeNode | None
     prior: float
     move: chess.Move | None = None
     visits: int = 0
     total_value: float = 0.0
     virtual_loss: float = 0.0
-    children: dict[chess.Move, "TreeNode"] = field(default_factory=dict)
+    children: dict[chess.Move, TreeNode] = field(default_factory=dict)
     is_terminal: bool = False
     terminal_value: float = 0.0
 
@@ -60,7 +60,7 @@ class TreeNode:
     def is_expanded(self) -> bool:
         return bool(self.children) or self.is_terminal
 
-    def select(self, c_puct: float) -> tuple[chess.Move, "TreeNode"]:
+    def select(self, c_puct: float) -> tuple[chess.Move, TreeNode]:
         sqrt_n = math.sqrt(max(self.visits, 1))
         best_score = -float("inf")
         best_move: chess.Move | None = None
@@ -178,6 +178,7 @@ class MCTS:
             self._expand_and_backup(batch)
             sims_done += len(batch)
 
+        assert self.root is not None
         return self.root
 
     def policy(
@@ -240,13 +241,13 @@ class MCTS:
         rng = np.random.default_rng()
         noise = rng.dirichlet([self.dirichlet_alpha] * len(node.children))
         eps = self.dirichlet_eps
-        for (_, child), n in zip(node.children.items(), noise):
+        for (_, child), n in zip(node.children.items(), noise, strict=True):
             child.prior = (1 - eps) * child.prior + eps * float(n)
 
     def _expand_and_backup(self, batch: list[tuple[TreeNode, chess.Board]]) -> None:
         boards = [b for _, b in batch]
         priors_per_leaf, values = self._evaluate(boards)
-        for (leaf, board), priors, value in zip(batch, priors_per_leaf, values):
+        for (leaf, _board), priors, value in zip(batch, priors_per_leaf, values, strict=True):
             leaf.expand(priors)
             self._undo_virtual_loss(leaf)
             leaf.backup(value)
@@ -262,17 +263,16 @@ class MCTS:
         values_list = values.view(-1).cpu().numpy().tolist()
 
         priors_per_leaf: list[list[tuple[chess.Move, float]]] = []
-        for board, probs_row in zip(boards, probs):
+        for board, probs_row in zip(boards, probs, strict=True):
             legal = list(board.legal_moves)
             if not legal:
                 priors_per_leaf.append([])
                 continue
-            indices = np.fromiter((move_to_index(m) for m in legal), dtype=np.int64, count=len(legal))
+            indices = np.fromiter(
+                (move_to_index(m) for m in legal), dtype=np.int64, count=len(legal)
+            )
             masked = probs_row[indices]
             total = float(masked.sum())
-            if total <= 1e-8:
-                masked = np.full_like(masked, 1.0 / len(legal))
-            else:
-                masked = masked / total
-            priors_per_leaf.append(list(zip(legal, masked.astype(float).tolist())))
+            masked = np.full_like(masked, 1.0 / len(legal)) if total <= 1e-8 else masked / total
+            priors_per_leaf.append(list(zip(legal, masked.astype(float).tolist(), strict=True)))
         return priors_per_leaf, values_list

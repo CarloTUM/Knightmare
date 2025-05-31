@@ -12,8 +12,8 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import chess
 import numpy as np
@@ -77,6 +77,7 @@ def play_one_game(
         mcts.advance(move)
         plies += 1
 
+    winner: bool | None
     if resigned is not None:
         winner = chess.BLACK if resigned else chess.WHITE
     else:

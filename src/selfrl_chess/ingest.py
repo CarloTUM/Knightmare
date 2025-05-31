@@ -7,9 +7,9 @@ converges far faster during self-play.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
 
 import chess
 import chess.pgn
@@ -38,9 +38,7 @@ def _eligible(game: chess.pgn.Game, filt: IngestFilter) -> bool:
         return False
     if min(white_elo, black_elo) < filt.min_elo:
         return False
-    if filt.require_termination and headers.get("Termination", "Normal") != "Normal":
-        return False
-    return True
+    return not (filt.require_termination and headers.get("Termination", "Normal") != "Normal")
 
 
 def _value_for_position(turn: bool, result: str) -> float:
